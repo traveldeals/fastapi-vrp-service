@@ -75,22 +75,38 @@ class OptimizeResponse(BaseModel):
 # -------------------------------------------------------------
 
 def geocode_address(address: str) -> Tuple[float, float]:
-    """Converts plain text address into (Lat, Lon) coordinates via OpenStreetMap Nominatim."""
-    headers = {"User-Agent": "DispatchAgent/1.0 (agent@yourdomain.com)"}
-    url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(address)}&format=json&limit=1"
-    
+    """Converts plain text address into (Lat, Lon) coordinates.
+    Tries Photon geocoding API first (friendly to Cloud Run IPs),
+    then falls back to OpenStreetMap Nominatim.
+    """
+    # Try Photon (Komoot) API first
+    photon_url = f"https://photon.komoot.io/api/?q={requests.utils.quote(address)}&limit=1"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        if not data:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Address could not be geocoded: {address}"
-            )
-        return float(data[0]["lat"]), float(data[0]["lon"])
+        response = requests.get(photon_url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data and "features" in data and len(data["features"]) > 0:
+                coords = data["features"][0]["geometry"]["coordinates"]
+                return float(coords[1]), float(coords[0]) # (Latitude, Longitude)
     except Exception as e:
-        logger.error(f"Geocoding failure: {str(e)}")
-        raise HTTPException(status_code=503, detail="Geocoding service down or timed out.")
+        logger.warning(f"Photon geocoding failed, trying Nominatim fallback: {str(e)}")
+
+    # Fallback to Nominatim
+    headers = {"User-Agent": "DispatchAgent/1.0 (agent@yourdomain.com)"}
+    nominatim_url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(address)}&format=json&limit=1"
+    try:
+        response = requests.get(nominatim_url, headers=headers, timeout=5)
+        data = response.json()
+        if data and len(data) > 0:
+            return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception as e:
+        logger.error(f"Nominatim geocoding fallback failed: {str(e)}")
+        
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=f"Address could not be geocoded: {address}"
+    )
+
 
 def build_distance_matrix(coordinates: List[Tuple[float, float]]) -> List[List[int]]:
     """Generates street travel duration matrix (in seconds) via OSRM."""
